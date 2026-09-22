@@ -206,6 +206,8 @@ function activeEngines(){
 
 async function loadAll(){
   const engines = activeEngines();
+  // Apps Script can take 15-30s to wake up, so show that we're working instead of an empty queue.
+  document.getElementById('queue-list').innerHTML = '<div class="empty">Loading ' + engines.length + ' inboxes… this can take up to 30 seconds.</div>';
   const results = await Promise.all(engines.map(function(engine){
     return fetch(engine.url + '?action=getData&pin=' + encodeURIComponent(PIN))
       .then(function(r){ return r.json(); })
@@ -215,9 +217,11 @@ async function loadAll(){
 
   allRows = [];
   let anyPinError = false;
+  const failed = [];
   results.forEach(function(result){
     const data = result.data;
     if (data.error === 'PIN required') anyPinError = true;
+    else if (data.error) failed.push(result.engine.label);
     if (data.inquiries) {
       data.inquiries.forEach(function(row){
         row._engineCode = result.engine.code;
@@ -236,6 +240,11 @@ async function loadAll(){
 
   renderKpis();
   renderQueue();
+  // Never let a broken engine look like "all caught up".
+  if (failed.length) {
+    document.getElementById('queue-list').insertAdjacentHTML('afterbegin',
+      '<div class="empty" style="color:var(--red)">Couldn\u2019t reach: ' + failed.map(escapeHtml).join(', ') + '. Tap Refresh to try again.</div>');
+  }
 }
 
 function renderKpis(){
