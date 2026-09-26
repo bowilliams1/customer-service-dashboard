@@ -107,7 +107,23 @@ textarea{
 .btn:hover{border-color:var(--green);}
 .btn.primary{background:var(--green-dim);border-color:var(--green);color:#fff;}
 .btn.danger{border-color:var(--red-dim);color:var(--red);}
-.btn-row{display:flex;gap:10px;margin-top:14px;}
+.btn-row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;}
+/* Detail pop-up scrolls on its own. Before this, a long thread (Karen, 2026-09-25) ran off the
+   bottom of the screen with no way to reach the draft or the Send button. */
+#detail-overlay{overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;padding:0 12px;}
+#detail-panel{max-width:760px;margin:24px auto 60px;}
+body.modal-open{overflow:hidden;}
+.detail-body{overflow-wrap:anywhere;}
+details.older{margin:6px 0 4px;}
+details.older > summary{cursor:pointer;font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;padding:6px 0;}
+details.older .detail-body{max-height:50vh;overflow-y:auto;}
+textarea{box-sizing:border-box;}
+.redraft{margin-top:16px;border-top:1px solid var(--edge);padding-top:12px;}
+.redraft input{width:100%;box-sizing:border-box;background:var(--panel2);color:var(--text);border:1px solid var(--edge-lit);font-family:'IBM Plex Mono',monospace;font-size:13px;padding:10px 12px;margin:6px 0 8px;}
+@media (max-width:560px){
+  #detail-panel{margin:12px auto 40px;}
+  textarea,.redraft input{font-size:16px;} /* 16px+ stops phones from zooming in on tap */
+}
 
 /* PIN gate */
 #pin-gate{
@@ -171,7 +187,7 @@ textarea{
 
 <!-- Detail / edit modal, simple inline panel rather than a true modal -->
 <div id="detail-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10;">
-  <div style="max-width:760px;margin:40px auto;" class="panel" id="detail-panel"></div>
+  <div class="panel" id="detail-panel"></div>
 </div>
 
 <script>
@@ -303,23 +319,85 @@ function openDetail(rowKey, engineCode){
   const overlay = document.getElementById('detail-overlay');
   const panel = document.getElementById('detail-panel');
   const isInternal = String(row.Category || '').indexOf('INTERNAL:') === 0;
+  const parts = splitThread(row.Body);
   panel.innerHTML =
     '<div class="section-head"><span>' + escapeHtml(row.Subject || '') + '</span>' +
     '<button class="btn" onclick="closeDetail()" style="font-size:11px;padding:6px 12px;">Close</button></div>' +
     '<div class="mono dim" style="font-size:12px;">From: ' + escapeHtml(row.From || '') +
-    ' &nbsp; Tier: <span class="tier ' + row['Safety Tier'] + '">' + row['Safety Tier'] + '</span></div>' +
-    (row['Safety Reasons'] ? '<div class="mono" style="font-size:12px;color:var(--amber);margin-top:6px;">Flags: ' + escapeHtml(row['Safety Reasons']) + '</div>' : '') +
-    '<div class="detail-body">' + escapeHtml(row.Body || '') + '</div>' +
+    ' &nbsp; Tier: <span id="detail-tier" class="tier ' + row['Safety Tier'] + '">' + row['Safety Tier'] + '</span></div>' +
+    '<div id="detail-flags" class="mono" style="font-size:12px;color:var(--amber);margin-top:6px;">' + (row['Safety Reasons'] ? 'Flags: ' + escapeHtml(row['Safety Reasons']) : '') + '</div>' +
+    '<div class="detail-body">' + escapeHtml(parts.latest) + '</div>' +
+    (parts.older ? '<details class="older"><summary>Show earlier messages in this thread</summary><div class="detail-body">' + escapeHtml(parts.older) + '</div></details>' : '') +
     '<div style="font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px;">Draft — edit below if needed</div>' +
     '<textarea id="draft-edit">' + escapeHtml(row.Draft || '') + '</textarea>' +
     '<div class="btn-row">' +
       '<button class="btn primary" onclick="doAction(\'approveSend\',\'' + rowKey + '\',\'' + engineCode + '\')">Send</button>' +
       '<button class="btn danger" onclick="doAction(\'reject\',\'' + rowKey + '\',\'' + engineCode + '\')">Reject</button>' +
       (!isInternal ? '<button class="btn" onclick="doAction(\'createJeffNotification\',\'' + rowKey + '\',\'' + engineCode + '\')">Flag for Reshipment → Jeff</button>' : '') +
-    '</div>';
+    '</div>' +
+    (!isInternal ?
+      '<div class="redraft">' +
+        '<div style="font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;">Not right? Tell Claude what to change (optional), then Redraft</div>' +
+        '<input id="redraft-note" type="text" placeholder="e.g. Use 8 oz, let it sit overnight, rinse with warm water">' +
+        '<button class="btn" id="redraft-btn" onclick="doRedraft(\'' + rowKey + '\',\'' + engineCode + '\')">Redraft</button>' +
+        '<span id="redraft-status" class="mono dim" style="font-size:12px;margin-left:10px;"></span>' +
+      '</div>' : '');
   overlay.style.display = 'block';
+  overlay.scrollTop = 0;
+  document.body.classList.add('modal-open');
 }
-function closeDetail(){ document.getElementById('detail-overlay').style.display = 'none'; }
+function closeDetail(){
+  document.getElementById('detail-overlay').style.display = 'none';
+  document.body.classList.remove('modal-open');
+}
+
+// Splits the newest message from the quoted history below it (Gmail "On ... wrote:", ">" quote
+// lines, Outlook "Original Message" / "From: ... Sent:") so a long thread doesn't bury what's new.
+// If nothing sits above the quote, show everything rather than an empty box.
+function splitThread(body){
+  const s = String(body || '');
+  const cands = [
+    s.search(/(^|\n)On [^\n]{0,200}(\n[^\n]{0,200})?wrote:[ \t]*\r?\n/),
+    s.search(/(^|\n)>/),
+    s.search(/(^|\n)-{2,}\s*Original Message/i),
+    s.search(/(^|\n)From: [^\n]+\n(Sent|Date): /),
+  ].filter(function(i){ return i > 0; });
+  if (!cands.length) return { latest: s, older: '' };
+  const cut = Math.min.apply(null, cands);
+  const latest = s.slice(0, cut).trim();
+  if (!latest) return { latest: s, older: '' };
+  return { latest: latest, older: s.slice(cut).trim() };
+}
+
+// Bo's Redraft button: sends his optional note to the engine, which re-runs Claude with it and
+// updates the row in place. The new draft drops straight into the edit box, ready to review.
+async function doRedraft(rowKey, engineCode){
+  const engine = ENGINES.find(function(e){ return e.code === engineCode; });
+  const btn = document.getElementById('redraft-btn');
+  const status = document.getElementById('redraft-status');
+  const note = document.getElementById('redraft-note').value.trim();
+  btn.disabled = true;
+  status.textContent = 'Redrafting… this can take up to a minute.';
+  try {
+    const res = await fetch(engine.url, { method: 'POST', body: JSON.stringify({ action: 'redraft', rowKey: rowKey, note: note, pin: PIN }) })
+      .then(function(r){ return r.json(); });
+    if (res.error) { status.textContent = ''; alert('Error: ' + res.error); return; }
+    document.getElementById('draft-edit').value = res.draft;
+    const tierEl = document.getElementById('detail-tier');
+    tierEl.textContent = res.tier; tierEl.className = 'tier ' + res.tier;
+    document.getElementById('detail-flags').textContent = res.reasons ? ('Flags: ' + res.reasons) : '';
+    const row = findRow(rowKey, engineCode);
+    if (row) { row.Draft = res.draft; row['Safety Tier'] = res.tier; row['Safety Reasons'] = res.reasons; row.Category = res.category; }
+    status.textContent = 'New draft is ready above. Review it, then Send.';
+    renderKpis();
+    renderQueue();
+  } catch (err) {
+    status.textContent = '';
+    alert('Error: ' + err);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 async function doAction(action, rowKey, engineCode){
   const engine = ENGINES.find(function(e){ return e.code === engineCode; });
