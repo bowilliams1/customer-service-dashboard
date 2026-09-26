@@ -429,6 +429,7 @@ let lastLoadAt = 0;
 // Coming back to the page (switching apps, unlocking the phone): refresh the queue, unless an email is open
 // or a redraft is running. After an hour away the whole page reloads, so a Home Screen app picks up updates.
 function onReturn(){
+  checkForUpdate();
   if (document.getElementById('app').style.display !== 'block') return;
   if (!PIN && !hasFullSession()) { sessionEnded(); return; }
   if (document.getElementById('detail-overlay').style.display === 'block') return;
@@ -439,6 +440,33 @@ function onReturn(){
 }
 document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') onReturn(); });
 window.addEventListener('pageshow', function(e){ if (e.persisted) onReturn(); });
+
+// ---- Every device on the newest version (Bo, 2026-09-26: "both dashboards need to be the same") ----
+// A tab or Home Screen app left open keeps running the copy it first loaded. The published copy carries a
+// version stamp; when version.json names a newer one, the page reloads itself, but never while an email is
+// open, a Send/File/Skip or Redraft is running, or a password is half typed.
+const APP_VERSION = '20260926-184528'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
+let newerVersion = '';
+let actionsInFlight = 0;
+async function checkForUpdate(){
+  if (APP_VERSION === 'dev') return;
+  try {
+    const res = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) return;
+    const v = String((await res.json()).version || '');
+    if (v && v !== APP_VERSION) { newerVersion = v; updateWhenIdle(); }
+  } catch (e) { /* offline or a hiccup: the next check tries again */ }
+}
+function updateWhenIdle(){
+  if (!newerVersion) return;
+  if (document.getElementById('detail-overlay').style.display === 'block') return;
+  if (actionsInFlight || Object.keys(redraftsInFlight).length) return;
+  if (document.getElementById('pin-input').value) return;
+  const target = '?v=' + encodeURIComponent(newerVersion);
+  if (location.search === target) return; // already reloaded for this version once: never loop
+  location.replace(location.pathname + target);
+}
+setInterval(checkForUpdate, 5 * 60 * 1000);
 const retiredLibIds = {};
 function usesRetiredId(r){
   const u = parseLibraryUsed(r['Library Used']);
@@ -532,8 +560,13 @@ function openDetail(rowKey, engineCode){
       (row.Status === 'SENDING' ? '<button class="btn" onclick="doAction(\'markSent\',\'' + rowKey + '\',\'' + engineCode + '\', this)">It went out: mark as sent</button>' +
         '<button class="btn" onclick="doAction(\'notSent\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Not in Gmail Sent: put it back</button>' : '') +
       '<button class="btn' + (row.Status === 'SENDING' ? '' : ' primary') + '" onclick="doAction(\'approveSend\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Send</button>' +
-      '<button class="btn danger" onclick="doAction(\'reject\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Reject</button>' +
+      (!isInternal && row.Status !== 'SENDING' ? '<button class="btn" onclick="doAction(\'file\',\'' + rowKey + '\',\'' + engineCode + '\', this)">File</button>' : '') +
+      '<button class="btn" onclick="doAction(\'reject\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Skip</button>' +
       (!isInternal ? '<button class="btn" onclick="doAction(\'createJeffNotification\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Flag for Reshipment → Jeff</button>' : '') +
+    '</div>' +
+    '<div class="mono dim" style="font-size:11px;margin-top:8px;">' + (isInternal
+      ? 'Skip takes this note off the dashboard.'
+      : 'Send and File both move the email to Answered CS (marked read, out of your inbox). File is for one you already answered. Skip only takes it off the dashboard: the email stays in your inbox.') +
     '</div>' +
     (!isInternal ?
       '<div class="redraft">' +
@@ -561,6 +594,7 @@ function openDetail(rowKey, engineCode){
 function closeDetail(){
   document.getElementById('detail-overlay').style.display = 'none';
   document.body.classList.remove('modal-open');
+  updateWhenIdle();
 }
 
 function productHtml(product){
@@ -793,10 +827,12 @@ async function doAction(action, rowKey, engineCode, btn){
   const buttons = Array.prototype.slice.call(document.querySelectorAll('#action-row button'));
   const label = btn ? btn.textContent : '';
   buttons.forEach(function(b){ b.disabled = true; });
-  if (btn) btn.textContent = action === 'approveSend' ? 'Sending\u2026' : action === 'createJeffNotification' ? 'Writing the note for Jeff\u2026' : 'Working\u2026';
+  if (btn) btn.textContent = action === 'approveSend' ? 'Sending\u2026' : action === 'createJeffNotification' ? 'Writing the note for Jeff\u2026' : action === 'file' ? 'Filing\u2026' : 'Working\u2026';
   const post = function(b){ return fetch(engine.url, { method: 'POST', body: JSON.stringify(b) }).then(function(r){ return r.json(); }); };
   if (action === 'markSent' && !confirm('Only press OK if you found this exact reply in Gmail \u2192 Sent. It will be recorded as sent (nothing is emailed).')) { buttons.forEach(function(b){ b.disabled = false; }); if (btn) btn.textContent = label; return; }
-  if (action === 'notSent' && !confirm('Only press OK if this reply is NOT in Gmail \u2192 Sent. It goes back to the queue so you can edit, redraft, send or reject it.')) { buttons.forEach(function(b){ b.disabled = false; }); if (btn) btn.textContent = label; return; }
+  if (action === 'notSent' && !confirm('Only press OK if this reply is NOT in Gmail \u2192 Sent. It goes back to the queue so you can edit, redraft, send, file or skip it.')) { buttons.forEach(function(b){ b.disabled = false; }); if (btn) btn.textContent = label; return; }
+  if (action === 'file' && !confirm('File this email in Answered CS? It is marked read and leaves your inbox. Nothing is sent to the customer.')) { buttons.forEach(function(b){ b.disabled = false; }); if (btn) btn.textContent = label; return; }
+  actionsInFlight++;
   try {
     let res = await post(body);
     if (action === 'approveSend' && res.sendingUnclear) {
@@ -831,6 +867,8 @@ async function doAction(action, rowKey, engineCode, btn){
   } finally {
     buttons.forEach(function(b){ b.disabled = false; });
     if (btn) btn.textContent = label;
+    actionsInFlight--;
+    updateWhenIdle();
   }
 }
 
@@ -858,6 +896,7 @@ if (hasFullSession()) {
   renderSessionLine();
   loadAll();
 }
+checkForUpdate();
 </script>
 </body>
 </html>
