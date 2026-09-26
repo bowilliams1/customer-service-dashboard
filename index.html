@@ -326,6 +326,7 @@ function openDetail(rowKey, engineCode){
     '<div class="mono dim" style="font-size:12px;">From: ' + escapeHtml(row.From || '') +
     ' &nbsp; Tier: <span id="detail-tier" class="tier ' + row['Safety Tier'] + '">' + row['Safety Tier'] + '</span></div>' +
     '<div id="detail-flags" class="mono" style="font-size:12px;color:var(--amber);margin-top:6px;">' + (row['Safety Reasons'] ? 'Flags: ' + escapeHtml(row['Safety Reasons']) : '') + '</div>' +
+    '<div id="detail-research">' + researchHtml(row.Research) + '</div>' +
     '<div class="detail-body">' + escapeHtml(parts.latest) + '</div>' +
     (parts.older ? '<details class="older"><summary>Show earlier messages in this thread</summary><div class="detail-body">' + escapeHtml(parts.older) + '</div></details>' : '') +
     '<div style="font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px;">Draft — edit below if needed</div>' +
@@ -349,6 +350,13 @@ function openDetail(rowKey, engineCode){
 function closeDetail(){
   document.getElementById('detail-overlay').style.display = 'none';
   document.body.classList.remove('modal-open');
+}
+
+// "What Claude looked up": its research notes plus any web pages it used. For Bo only; the
+// email itself never cites outside sources (brand rule).
+function researchHtml(text){
+  if (!text) return '';
+  return '<details class="older"><summary>What Claude looked up</summary><div class="detail-body">' + escapeHtml(text) + '</div></details>';
 }
 
 // Splits the newest message from the quoted history below it (Gmail "On ... wrote:", ">" quote
@@ -386,8 +394,9 @@ async function doRedraft(rowKey, engineCode){
     const tierEl = document.getElementById('detail-tier');
     tierEl.textContent = res.tier; tierEl.className = 'tier ' + res.tier;
     document.getElementById('detail-flags').textContent = res.reasons ? ('Flags: ' + res.reasons) : '';
+    document.getElementById('detail-research').innerHTML = researchHtml(res.research);
     const row = findRow(rowKey, engineCode);
-    if (row) { row.Draft = res.draft; row['Safety Tier'] = res.tier; row['Safety Reasons'] = res.reasons; row.Category = res.category; }
+    if (row) { row.Draft = res.draft; row['Safety Tier'] = res.tier; row['Safety Reasons'] = res.reasons; row.Category = res.category; row.Research = res.research; }
     status.textContent = 'New draft is ready above. Review it, then Send.';
     renderKpis();
     renderQueue();
