@@ -125,6 +125,28 @@ textarea{box-sizing:border-box;}
   textarea,.redraft input{font-size:16px;} /* 16px+ stops phones from zooming in on tap */
 }
 
+/* Answer Library (2026-09-26) */
+.btn:disabled{opacity:.5;cursor:wait;}
+.banner{border:1px solid var(--amber);color:var(--amber);background:rgba(224,169,64,.08);padding:10px 14px;font-size:13px;line-height:1.5;margin-bottom:16px;}
+.banner.red{border-color:var(--red);color:var(--red);background:rgba(224,82,82,.08);}
+.pill.ok{background:rgba(106,191,75,.15);color:var(--green);}
+.pill.warn{background:rgba(224,169,64,.15);color:var(--amber);}
+.pill{display:inline-block;margin-bottom:4px;font-family:'IBM Plex Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:.05em;padding:3px 7px;border-radius:2px;margin-right:6px;background:rgba(224,82,82,.18);color:var(--red);}
+.product-line{font-family:'IBM Plex Mono',monospace;font-size:12px;margin-top:6px;}
+details.libbox > summary{color:var(--green);}
+.libitem{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-top:1px solid var(--edge);background:var(--panel2);font-size:13px;line-height:1.45;}
+.libitem:first-of-type{border-top:none;}
+.libitem .txt{flex:1;min-width:0;overflow-wrap:anywhere;}
+.libitem .kind{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dim);}
+.libitem .used{color:var(--green);}
+.libitem .btn{font-size:11px;padding:5px 10px;flex-shrink:0;}
+.libitem.retired .txt{opacity:.45;text-decoration:line-through;}
+.libhelp{font-size:12px;color:var(--dim);padding:8px 12px;background:var(--panel2);border-top:1px solid var(--edge);}
+.redraft .remember{display:flex;align-items:center;gap:8px;font-size:13px;margin:0 0 10px;cursor:pointer;}
+.redraft .remember input{width:18px;height:18px;margin:0;padding:0;flex-shrink:0;}
+#remember-status{font-size:13px;margin-top:10px;line-height:1.5;}
+#remember-status .btn{font-size:11px;padding:4px 10px;margin-left:8px;}
+
 /* PIN gate */
 #pin-gate{
   min-height:100vh; display:flex; align-items:center; justify-content:center; flex-direction:column;
@@ -163,6 +185,7 @@ textarea{box-sizing:border-box;}
     </div>
   </header>
 
+  <div id="banner-area"></div>
   <div class="kpi-row" id="kpi-row"></div>
 
   <div class="panel">
@@ -233,11 +256,18 @@ async function loadAll(){
 
   allRows = [];
   let anyPinError = false;
+  let lockedMsg = '';
   const failed = [];
+  unreadEngines = {};
+  const libraryDown = [];
   results.forEach(function(result){
     const data = result.data;
     if (data.error === 'PIN required') anyPinError = true;
+    else if (data.error && (data.locked || /locked|paused|too many wrong passwords/i.test(data.error))) lockedMsg = data.error;
     else if (data.error) failed.push(result.engine.label);
+    if (data.error) unreadEngines[result.engine.code] = true;
+    // Older engine versions don't report the library at all; only a reported problem shows the banner.
+    if (data.library && data.library.ok === false) libraryDown.push({ name: result.engine.label, error: String(data.library.error || '') });
     if (data.inquiries) {
       data.inquiries.forEach(function(row){
         row._engineCode = result.engine.code;
@@ -247,24 +277,51 @@ async function loadAll(){
     }
   });
 
-  if (anyPinError) {
-    document.getElementById('pin-error').textContent = 'Wrong password.';
+  // A locked inbox (too many wrong passwords) only blocks itself when the other one still opened.
+  const lockedEngines = results.filter(function(r){ return r.data.error && (r.data.locked || /locked|paused|too many wrong passwords/i.test(r.data.error)); }).map(function(r){ return r.engine.label; });
+  const openedAny = results.some(function(r){ return r.data.ok; });
+  let pausedNote = '';
+  if (lockedMsg && openedAny && !anyPinError) {
+    pausedNote = lockedEngines.join(' and ') + ' is paused for up to 15 minutes because too many wrong passwords were tried (not necessarily by you). The other inbox works normally.';
+    lockedMsg = '';
+  }
+  if (anyPinError || lockedMsg) {
+    document.getElementById('pin-error').textContent = anyPinError ? 'Wrong password.' : lockedMsg;
     document.getElementById('pin-gate').style.display = 'flex';
     document.getElementById('app').style.display = 'none';
     return;
   }
 
+  document.getElementById('banner-area').innerHTML = libraryDown.length
+    ? '<div class="banner">The Answer Library isn\u2019t connected for ' + libraryDown.map(function(d){ return escapeHtml(d.name); }).join(' and ') +
+      ' right now. Replies still draft and send normally, and anything you send is saved to the library once it\u2019s back.' +
+      '<div class="mono dim" style="font-size:11px;margin-top:6px;">Details: ' + libraryDown.map(function(d){ return escapeHtml(d.name + ': ' + d.error); }).join(' \u00b7 ') + '</div></div>'
+    : '';
+  // Never let a broken engine look like "all caught up" (kept on every re-render of the queue).
+  queueNotesHtml = (pausedNote ? '<div class="empty" style="color:var(--amber)">' + escapeHtml(pausedNote) + '</div>' : '') +
+    (failed.length ? '<div class="empty" style="color:var(--red)">Couldn\u2019t reach: ' + failed.map(escapeHtml).join(', ') + '. Tap Refresh to try again.</div>' : '');
+  // Drafts written with a note or past reply that has since been retired (the engine checks; this page adds
+  // anything retired since the last load, in both inboxes).
+  allRows.forEach(function(r){ r._usesRetired = !!r._libraryRetired || usesRetiredId(r); });
   renderKpis();
   renderQueue();
-  // Never let a broken engine look like "all caught up".
-  if (failed.length) {
-    document.getElementById('queue-list').insertAdjacentHTML('afterbegin',
-      '<div class="empty" style="color:var(--red)">Couldn\u2019t reach: ' + failed.map(escapeHtml).join(', ') + '. Tap Refresh to try again.</div>');
-  }
 }
+let queueNotesHtml = '';
+const retiredLibIds = {};
+function usesRetiredId(r){
+  const u = parseLibraryUsed(r['Library Used']);
+  if (!u) return false;
+  const ids = (u.facts || []).map(function(f){ return f.id; }).concat((u.answers || []).map(function(a){ return a.id; }), u.relied || []);
+  return ids.some(function(id){ return retiredLibIds[id]; });
+}
+let unreadEngines = {};
+
+// SENDING = a Send that was interrupted (it may or may not have gone out). It stays in the queue,
+// on top, until Bo checks Gmail Sent.
+function isOpen(r){ return r.Status === 'PENDING' || r.Status === 'APPROVED' || r.Status === 'SENDING'; }
 
 function renderKpis(){
-  const pending = allRows.filter(function(r){ return r.Status === 'PENDING'; });
+  const pending = allRows.filter(isOpen);
   const red = pending.filter(function(r){ return r['Safety Tier'] === 'RED'; });
   const byEngine = {};
   activeEngines().forEach(function(e){ byEngine[e.code] = 0; });
@@ -274,7 +331,7 @@ function renderKpis(){
   html += kpiTile(pending.length, 'Pending review', red.length > 0);
   html += kpiTile(red.length, 'Flagged RED', red.length > 0);
   activeEngines().forEach(function(e){
-    html += kpiTile(byEngine[e.code] || 0, e.label);
+    html += kpiTile(unreadEngines[e.code] ? '\u2013' : (byEngine[e.code] || 0), e.label);
   });
   document.getElementById('kpi-row').innerHTML = html;
 }
@@ -284,15 +341,15 @@ function kpiTile(num, label, isRed){
 }
 
 function renderQueue(){
-  const pending = allRows.filter(function(r){ return r.Status === 'PENDING' || r.Status === 'APPROVED'; })
-    .sort(function(a,b){ return (a['Safety Tier'] === 'RED' ? 0 : 1) - (b['Safety Tier'] === 'RED' ? 0 : 1); });
+  const rank = function(r){ return r.Status === 'SENDING' ? 0 : r['Safety Tier'] === 'RED' ? 1 : 2; };
+  const pending = allRows.filter(isOpen).sort(function(a,b){ return rank(a) - rank(b); });
 
   const list = document.getElementById('queue-list');
   if (pending.length === 0) {
-    list.innerHTML = '<div class="empty">Nothing waiting — all caught up.</div>';
+    list.innerHTML = queueNotesHtml + '<div class="empty">Nothing waiting \u2014 all caught up.</div>';
     return;
   }
-  list.innerHTML = pending.map(function(row){
+  list.innerHTML = queueNotesHtml + pending.map(function(row){
     const isInternal = String(row.Category || '').indexOf('INTERNAL:') === 0;
     const badge = isInternal
       ? '<span class="badge internal" title="Internal note">→J</span>'
@@ -300,6 +357,9 @@ function renderQueue(){
     return '<div class="row" onclick="openDetail(\'' + row['Row Key'] + '\',\'' + row._engineCode + '\')">' +
       badge +
       '<div class="meta">' +
+        (row.Status === 'SENDING' ? '<div><span class="pill">Interrupted send: check Gmail Sent</span></div>' : '') +
+        (redraftNotices[row._engineCode + '|' + row['Row Key']] ? '<div><span class="pill ok">Redraft finished: open to see</span></div>' : '') +
+        (row._usesRetired ? '<div><span class="pill warn">Uses a note you retired: Redraft before sending</span></div>' : '') +
         '<div class="subject">' + escapeHtml(row.Subject || '(no subject)') + '</div>' +
         '<div class="from">' + escapeHtml(row.From || '') + ' · ' + escapeHtml(row.Category || '') + '</div>' +
         '<div class="snippet">' + escapeHtml((row.Draft || '').slice(0, 140)) + '</div>' +
@@ -320,36 +380,155 @@ function openDetail(rowKey, engineCode){
   const panel = document.getElementById('detail-panel');
   const isInternal = String(row.Category || '').indexOf('INTERNAL:') === 0;
   const parts = splitThread(row.Body);
+  panel.dataset.row = engineCode + '|' + rowKey;
   panel.innerHTML =
     '<div class="section-head"><span>' + escapeHtml(row.Subject || '') + '</span>' +
     '<button class="btn" onclick="closeDetail()" style="font-size:11px;padding:6px 12px;">Close</button></div>' +
     '<div class="mono dim" style="font-size:12px;">From: ' + escapeHtml(row.From || '') +
     ' &nbsp; Tier: <span id="detail-tier" class="tier ' + row['Safety Tier'] + '">' + row['Safety Tier'] + '</span></div>' +
     '<div id="detail-flags" class="mono" style="font-size:12px;color:var(--amber);margin-top:6px;">' + (row['Safety Reasons'] ? 'Flags: ' + escapeHtml(row['Safety Reasons']) : '') + '</div>' +
+    (!isInternal ? '<div id="detail-product" class="product-line">' + productHtml(row.Product) + '</div>' : '') +
+    (row.Status === 'SENDING' ? '<div class="banner red" style="margin:10px 0 0;">Sending this reply was interrupted, so it may already have reached the customer. Look in Gmail \u2192 Sent. If it is there, press \u201cIt went out: mark as sent\u201d below. If it is not, press \u201cNot in Gmail Sent: put it back\u201d.</div>' : '') +
+    (row._usesRetired ? '<div class="banner" style="margin:10px 0 0;">This draft was written using a note or past reply you have since retired. Redraft it before sending.</div>' : '') +
+    '<div id="detail-library">' + libraryHtml(row) + '</div>' +
     '<div id="detail-research">' + researchHtml(row.Research) + '</div>' +
     '<div class="detail-body">' + escapeHtml(parts.latest) + '</div>' +
     (parts.older ? '<details class="older"><summary>Show earlier messages in this thread</summary><div class="detail-body">' + escapeHtml(parts.older) + '</div></details>' : '') +
     '<div style="font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px;">Draft — edit below if needed</div>' +
     '<textarea id="draft-edit">' + escapeHtml(row.Draft || '') + '</textarea>' +
-    '<div class="btn-row">' +
-      '<button class="btn primary" onclick="doAction(\'approveSend\',\'' + rowKey + '\',\'' + engineCode + '\')">Send</button>' +
-      '<button class="btn danger" onclick="doAction(\'reject\',\'' + rowKey + '\',\'' + engineCode + '\')">Reject</button>' +
-      (!isInternal ? '<button class="btn" onclick="doAction(\'createJeffNotification\',\'' + rowKey + '\',\'' + engineCode + '\')">Flag for Reshipment → Jeff</button>' : '') +
+    '<div class="btn-row" id="action-row">' +
+      (row.Status === 'SENDING' ? '<button class="btn" onclick="doAction(\'markSent\',\'' + rowKey + '\',\'' + engineCode + '\', this)">It went out: mark as sent</button>' +
+        '<button class="btn" onclick="doAction(\'notSent\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Not in Gmail Sent: put it back</button>' : '') +
+      '<button class="btn' + (row.Status === 'SENDING' ? '' : ' primary') + '" onclick="doAction(\'approveSend\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Send</button>' +
+      '<button class="btn danger" onclick="doAction(\'reject\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Reject</button>' +
+      (!isInternal ? '<button class="btn" onclick="doAction(\'createJeffNotification\',\'' + rowKey + '\',\'' + engineCode + '\', this)">Flag for Reshipment → Jeff</button>' : '') +
     '</div>' +
     (!isInternal ?
       '<div class="redraft">' +
         '<div style="font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;">Not right? Tell Claude what to change (optional), then Redraft</div>' +
         '<input id="redraft-note" type="text" placeholder="e.g. Use 8 oz, let it sit overnight, rinse with warm water">' +
+        '<label class="remember"><input type="checkbox" id="remember-check"> Remember this for future emails (not just this one)</label>' +
         '<button class="btn" id="redraft-btn" onclick="doRedraft(\'' + rowKey + '\',\'' + engineCode + '\')">Redraft</button>' +
         '<span id="redraft-status" class="mono dim" style="font-size:12px;margin-left:10px;"></span>' +
+        '<div id="remember-status"></div>' +
       '</div>' : '');
   overlay.style.display = 'block';
   overlay.scrollTop = 0;
   document.body.classList.add('modal-open');
+  const key = engineCode + '|' + rowKey;
+  // Reopened while its redraft is still running: put back what Bo had typed.
+  if (redraftsInFlight[key] && document.getElementById('draft-edit')) document.getElementById('draft-edit').value = redraftsInFlight[key].startedDraft;
+  applyRedraftBusy(key);
+  if (redraftNotices[key]) {
+    const rs = document.getElementById('remember-status');
+    if (rs) rs.innerHTML = redraftNotices[key];
+    delete redraftNotices[key];
+    renderQueue();
+  }
 }
 function closeDetail(){
   document.getElementById('detail-overlay').style.display = 'none';
   document.body.classList.remove('modal-open');
+}
+
+function productHtml(product){
+  return product ? '<span class="dim">Product:</span> ' + escapeHtml(product)
+    : '<span class="dim">Product: couldn\u2019t tell which one, so no saved answers were used. Name it in a Redraft note (for example \u201cthis is the mole repellent\u201d) and I\u2019ll use them.</span>';
+}
+
+// "From your library": the saved facts and past replies Claude was shown for this draft. Bo can
+// retire anything that's wrong so no future draft uses it again.
+function parseLibraryUsed(s){
+  try { return s ? JSON.parse(s) : null; } catch (e) { return null; }
+}
+function libraryHtml(row){
+  const u = parseLibraryUsed(row['Library Used']);
+  const facts = (u && u.facts) || [], answers = (u && u.answers) || [], relied = (u && u.relied) || [];
+  const n = facts.length + answers.length;
+  if (!n) return '';
+  const rk = row['Row Key'], ec = row._engineCode;
+  let html = '<details class="older libbox"><summary>From your library (' + n + ')' +
+    (relied.length ? ' \u00b7 ' + relied.length + ' used in this draft' : '') + '</summary>';
+  facts.forEach(function(f){
+    html += libItemHtml('fact', f.id, 'Saved fact \u00b7 ' + (f.product || '') + ' \u00b7 ' + String(f.savedAt || '').slice(0, 10),
+      f.text, relied.indexOf(f.id) !== -1, 'Forget', rk, ec);
+  });
+  answers.forEach(function(a){
+    html += libItemHtml('answer', a.id, 'Past reply' + (a.edited === 'YES' ? ' you edited' : '') + ' \u00b7 ' + String(a.savedAt || '').slice(0, 10) + (a.why ? ' \u00b7 ' + a.why : ''),
+      'Customer asked: ' + (a.question || ''), relied.indexOf(a.id) !== -1, 'Don\u2019t reuse', rk, ec);
+  });
+  html += '<div class="libhelp">If one of these is wrong or out of date, retire it so no future draft uses it. Then Redraft this one.</div></details>';
+  return html;
+}
+function libItemHtml(kind, id, kindLabel, text, used, btnLabel, rowKey, engineCode){
+  return '<div class="libitem"><div class="txt"><div class="kind">' + escapeHtml(kindLabel) +
+    (used ? ' \u00b7 <span class="used">used in this draft</span>' : '') + '</div>' + escapeHtml(text || '') + '</div>' +
+    '<button class="btn" onclick="retireItem(\'' + kind + '\',\'' + escapeHtml(id) + '\',\'' + engineCode + '\', this)">' + btnLabel + '</button></div>';
+}
+async function retireItem(kind, id, engineCode, btn){
+  const what = kind === 'fact' ? 'Forget this saved fact? Future drafts won\u2019t use it.' : 'Stop reusing this past reply? Future drafts won\u2019t see it.';
+  if (btn && !confirm(what)) return;
+  const engine = ENGINES.find(function(e){ return e.code === engineCode; });
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving\u2026'; }
+  try {
+    const res = await fetch(engine.url, { method: 'POST', body: JSON.stringify({ action: 'retireLibraryItem', kind: kind, id: id, pin: PIN }) })
+      .then(function(r){ return r.json(); });
+    if (res.error) { alert(errText(res.error)); if (btn) { btn.disabled = false; btn.textContent = kind === 'fact' ? 'Forget' : 'Don\u2019t reuse'; } return false; }
+    if (btn) { btn.textContent = kind === 'fact' ? 'Forgotten' : 'Won\u2019t reuse'; btn.closest('.libitem').classList.add('retired'); }
+    // Other open drafts (in both inboxes: they share one library) written with it get a "Redraft before sending" mark.
+    retiredLibIds[id] = true;
+    allRows.forEach(function(r){ if (usesRetiredId(r)) r._usesRetired = true; });
+    renderQueue();
+    if (btn && res.replaced && res.replaced.length) {
+      const f = res.replaced[0];
+      btn.closest('.libitem').insertAdjacentHTML('afterend', '<div class="libhelp">It had replaced an older note: \u201c' + escapeHtml(f.text) + '\u201d ' +
+        '<button class="btn" style="font-size:11px;padding:4px 10px;" onclick="restoreFact(\'' + escapeHtml(f.id) + '\',\'' + engineCode + '\', this)">Bring that one back</button></div>');
+    }
+    return true;
+  } catch (err) {
+    alert(netText(engine.label));
+    if (btn) { btn.disabled = false; btn.textContent = kind === 'fact' ? 'Forget' : 'Don\u2019t reuse'; }
+    return false;
+  }
+}
+
+async function restoreFact(id, engineCode, btn){
+  const engine = ENGINES.find(function(e){ return e.code === engineCode; });
+  btn.disabled = true; btn.textContent = 'Bringing it back\u2026';
+  try {
+    const res = await fetch(engine.url, { method: 'POST', body: JSON.stringify({ action: 'restoreFact', id: id, pin: PIN }) }).then(function(r){ return r.json(); });
+    if (res.error) { alert(errText(res.error)); btn.disabled = false; btn.textContent = 'Bring that one back'; return; }
+    btn.textContent = 'Brought back';
+    delete retiredLibIds[id];
+  } catch (err) {
+    alert(netText(engine.label)); btn.disabled = false; btn.textContent = 'Bring that one back';
+  }
+}
+
+// "Remember this" result under the Redraft box, with Undo (which retires the fact just saved).
+function rememberHtml(r, engineCode){
+  if (!r) return '';
+  if (!r.saved) return '<span style="color:var(--amber)">' + escapeHtml(r.reason || 'Not remembered.') + '</span>';
+  const replaced = (r.replacedFacts || []).filter(function(f){ return f.text; });
+  return '<span style="color:var(--green)">Remembered for ' + escapeHtml(r.where || 'this product') + ':</span> \u201c' + escapeHtml(r.text || '') + '\u201d' +
+    '<button class="btn" onclick="undoRemember(\'' + escapeHtml(r.id) + '\',\'' + engineCode + '\', this)">Undo</button>' +
+    (replaced.length ? '<div class="dim" style="margin-top:6px;">It replaced ' + (replaced.length === 1 ? 'this older note' : 'these older notes') + ' (Undo brings ' +
+      (replaced.length === 1 ? 'it' : 'them') + ' back): ' + replaced.map(function(f){ return '\u201c' + escapeHtml(f.text) + '\u201d'; }).join('; ') + '</div>'
+      : (r.replaced ? ' <span class="dim">(replaced ' + r.replaced + ' older note' + (r.replaced === 1 ? '' : 's') + '; Undo brings them back)</span>' : ''));
+}
+async function undoRemember(id, engineCode, btn){
+  const engine = ENGINES.find(function(e){ return e.code === engineCode; });
+  btn.disabled = true; btn.textContent = 'Undoing\u2026';
+  try {
+    const res = await fetch(engine.url, { method: 'POST', body: JSON.stringify({ action: 'undoRemember', id: id, pin: PIN }) })
+      .then(function(r){ return r.json(); });
+    if (res.error) { alert(errText(res.error)); btn.disabled = false; btn.textContent = 'Undo'; return; }
+    const back = (res.restored || []).length;
+    document.getElementById('remember-status').innerHTML = '<span class="dim">Undone. That note won\u2019t be used again' +
+      (back ? ', and the ' + (back === 1 ? 'older note it replaced is' : back + ' older notes it replaced are') + ' back' : '') + '.</span>';
+  } catch (err) {
+    alert(netText(engine.label)); btn.disabled = false; btn.textContent = 'Undo';
+  }
 }
 
 // "What Claude looked up": its research notes plus any web pages it used. For Bo only; the
@@ -377,48 +556,156 @@ function splitThread(body){
   return { latest: latest, older: s.slice(cut).trim() };
 }
 
-// Bo's Redraft button: sends his optional note to the engine, which re-runs Claude with it and
-// updates the row in place. The new draft drops straight into the edit box, ready to review.
+// Bo's Redraft button: sends his optional note to the engine, which re-runs Claude with it and updates the
+// row in place. Reviewed 2026-09-26: the redraft is tracked per email, so closing and reopening that email
+// keeps Send paused; the answer only lands in the email it belongs to; Bo's own edits made meanwhile are
+// never overwritten; and if the email isn't open when it finishes, the result waits on its queue card.
+const redraftsInFlight = {};
+const redraftNotices = {};
+function panelShows(key){
+  return document.getElementById('detail-panel').dataset.row === key && document.getElementById('detail-overlay').style.display !== 'none';
+}
+function applyRedraftBusy(key){
+  if (!panelShows(key)) return;
+  const busy = !!redraftsInFlight[key];
+  Array.prototype.slice.call(document.querySelectorAll('#action-row button')).forEach(function(b){ b.disabled = busy; });
+  const rb = document.getElementById('redraft-btn');
+  if (rb) rb.disabled = busy;
+  const st = document.getElementById('redraft-status');
+  if (st && busy) st.textContent = 'Redrafting\u2026 this can take up to a minute. Send is paused until it\u2019s done.';
+}
 async function doRedraft(rowKey, engineCode){
   const engine = ENGINES.find(function(e){ return e.code === engineCode; });
-  const btn = document.getElementById('redraft-btn');
-  const status = document.getElementById('redraft-status');
+  const key = engineCode + '|' + rowKey;
+  if (redraftsInFlight[key]) return;
   const note = document.getElementById('redraft-note').value.trim();
-  btn.disabled = true;
-  status.textContent = 'Redrafting… this can take up to a minute.';
+  const rememberBox = document.getElementById('remember-check');
+  const remember = !!(rememberBox && rememberBox.checked);
+  if (remember && !note) { document.getElementById('redraft-status').textContent = 'Type what to remember in the box first.'; return; }
+  const startedDraft = document.getElementById('draft-edit').value;
+  const storedRow = findRow(rowKey, engineCode);
+  const storedDraft = storedRow ? String(storedRow.Draft || '') : startedDraft;
+  document.getElementById('remember-status').innerHTML = '';
+  redraftsInFlight[key] = { startedDraft: startedDraft };
+  applyRedraftBusy(key);
+  let res = null, failedNet = false;
   try {
-    const res = await fetch(engine.url, { method: 'POST', body: JSON.stringify({ action: 'redraft', rowKey: rowKey, note: note, pin: PIN }) })
+    res = await fetch(engine.url, { method: 'POST', body: JSON.stringify({ action: 'redraft', rowKey: rowKey, note: note, remember: remember, pin: PIN }) })
       .then(function(r){ return r.json(); });
-    if (res.error) { status.textContent = ''; alert('Error: ' + res.error); return; }
-    document.getElementById('draft-edit').value = res.draft;
-    const tierEl = document.getElementById('detail-tier');
-    tierEl.textContent = res.tier; tierEl.className = 'tier ' + res.tier;
-    document.getElementById('detail-flags').textContent = res.reasons ? ('Flags: ' + res.reasons) : '';
-    document.getElementById('detail-research').innerHTML = researchHtml(res.research);
-    const row = findRow(rowKey, engineCode);
-    if (row) { row.Draft = res.draft; row['Safety Tier'] = res.tier; row['Safety Reasons'] = res.reasons; row.Category = res.category; row.Research = res.research; }
-    status.textContent = 'New draft is ready above. Review it, then Send.';
-    renderKpis();
-    renderQueue();
   } catch (err) {
-    status.textContent = '';
-    alert('Error: ' + err);
-  } finally {
-    btn.disabled = false;
+    failedNet = true;
   }
+  delete redraftsInFlight[key];
+  const here = panelShows(key);
+  if (here) {
+    applyRedraftBusy(key);
+    document.getElementById('redraft-status').textContent = '';
+  }
+  if (failedNet || res.error) {
+    const msg = failedNet ? netText(engine.label) : errText(res.error);
+    if (here) alert(msg);
+    else { redraftNotices[key] = '<span style="color:var(--amber)">The redraft didn\u2019t go through: ' + escapeHtml(msg) + '</span>'; renderQueue(); }
+    return;
+  }
+  const row = findRow(rowKey, engineCode);
+  if (row) {
+    row.Draft = res.draft; row['Safety Tier'] = res.tier; row['Safety Reasons'] = res.reasons; row.Category = res.category; row.Research = res.research;
+    if (res.product !== undefined) row.Product = res.product;
+    if (res.libraryUsed !== undefined) row['Library Used'] = res.libraryUsed;
+    row._usesRetired = false;
+  }
+  const rememberNote = rememberHtml(res.remembered, engineCode);
+  if (!here) {
+    redraftNotices[key] = '<span style="color:var(--green)">The new draft is ready (it is in the box above).</span>' + (rememberNote ? '<div style="margin-top:6px;">' + rememberNote + '</div>' : '');
+    renderKpis(); renderQueue();
+    return;
+  }
+  const box = document.getElementById('draft-edit');
+  const status = document.getElementById('redraft-status');
+  if (box.value !== startedDraft && box.value !== storedDraft) {
+    // Bo typed in the box while the redraft ran: keep his text, offer the new one.
+    status.innerHTML = 'A new draft is ready, but you edited the text meanwhile, so yours is kept. ' +
+      '<button class="btn" id="use-new-draft" style="font-size:11px;padding:4px 10px;">Use the new draft</button>';
+    document.getElementById('use-new-draft').onclick = function(){ box.value = res.draft; status.textContent = 'New draft is in the box above. Review it, then Send.'; };
+  } else {
+    box.value = res.draft;
+    status.textContent = 'New draft is ready above. Review it, then Send.';
+  }
+  const tierEl = document.getElementById('detail-tier');
+  tierEl.textContent = res.tier; tierEl.className = 'tier ' + res.tier;
+  document.getElementById('detail-flags').textContent = res.reasons ? ('Flags: ' + res.reasons) : '';
+  document.getElementById('detail-research').innerHTML = researchHtml(res.research);
+  const prodEl = document.getElementById('detail-product');
+  if (prodEl && res.product !== undefined) prodEl.innerHTML = productHtml(res.product);
+  if (row) document.getElementById('detail-library').innerHTML = libraryHtml(row);
+  const rb = document.getElementById('remember-check');
+  if (rb) rb.checked = false;
+  document.getElementById('remember-status').innerHTML = rememberNote;
+  renderKpis();
+  renderQueue();
 }
 
-async function doAction(action, rowKey, engineCode){
+// Every button in the row is disabled while one action is in flight, so a double tap can't send twice.
+async function doAction(action, rowKey, engineCode, btn){
   const engine = ENGINES.find(function(e){ return e.code === engineCode; });
   const editedDraft = document.getElementById('draft-edit') ? document.getElementById('draft-edit').value : undefined;
   const body = { action: action, rowKey: rowKey, pin: PIN };
   if (action === 'approveSend') body.editedDraft = editedDraft;
-  if (action === 'createJeffNotification') body.editedNote = editedDraft;
+  // The Jeff note is written by the engine from the customer's email (order #, item, quantity, address),
+  // never from the customer reply in the box (review 2026-09-26).
 
-  const res = await fetch(engine.url, { method: 'POST', body: JSON.stringify(body) }).then(function(r){ return r.json(); });
-  if (res.error) { alert('Error: ' + res.error); return; }
-  closeDetail();
-  loadAll();
+  const buttons = Array.prototype.slice.call(document.querySelectorAll('#action-row button'));
+  const label = btn ? btn.textContent : '';
+  buttons.forEach(function(b){ b.disabled = true; });
+  if (btn) btn.textContent = action === 'approveSend' ? 'Sending\u2026' : action === 'createJeffNotification' ? 'Writing the note for Jeff\u2026' : 'Working\u2026';
+  const post = function(b){ return fetch(engine.url, { method: 'POST', body: JSON.stringify(b) }).then(function(r){ return r.json(); }); };
+  if (action === 'markSent' && !confirm('Only press OK if you found this exact reply in Gmail \u2192 Sent. It will be recorded as sent (nothing is emailed).')) { buttons.forEach(function(b){ b.disabled = false; }); if (btn) btn.textContent = label; return; }
+  if (action === 'notSent' && !confirm('Only press OK if this reply is NOT in Gmail \u2192 Sent. It goes back to the queue so you can edit, redraft, send or reject it.')) { buttons.forEach(function(b){ b.disabled = false; }); if (btn) btn.textContent = label; return; }
+  try {
+    let res = await post(body);
+    if (action === 'approveSend' && res.sendingUnclear) {
+      // The row is now an interrupted send: show it with the "mark as sent" / "put it back" buttons.
+      alert(res.error);
+      const r0 = findRow(rowKey, engineCode);
+      if (r0) { r0.Status = 'SENDING'; r0.Draft = editedDraft; }
+      renderKpis(); renderQueue();
+      openDetail(rowKey, engineCode);
+      return;
+    }
+    if (action === 'approveSend' && res.maybeSent) {
+      if (!confirm(res.error + '\n\nSend it again anyway?')) return;
+      body.confirmResend = true;
+      res = await post(body);
+    }
+    if (action === 'approveSend' && res.brandWarning) {
+      if (!confirm(res.error + '\n\nPress Cancel to go back and fix it. Press OK only if you checked their order and it is the right brand.')) return;
+      body.confirmBrand = true;
+      res = await post(body);
+    }
+    if (res.error) { alert(errText(res.error)); return; }
+    if (res.alreadySent) alert(action === 'markSent' ? 'It was already marked as sent.' : 'This reply was already sent earlier, so it was not sent again.');
+    if (res.warning) alert(res.warning);
+    closeDetail();
+    loadAll();
+  } catch (err) {
+    alert(action === 'approveSend'
+      ? 'Couldn\u2019t confirm the send (connection problem). Tap Refresh: if this email has left the queue, it was sent. Check Gmail Sent before trying again.'
+      : netText(engine.label));
+  } finally {
+    buttons.forEach(function(b){ b.disabled = false; });
+    if (btn) btn.textContent = label;
+  }
+}
+
+// The engine reports errors as "Error: ..." already; don't show "Error: Error: ...". "PIN" is never shown.
+function errText(e){
+  const t = String(e || 'unknown problem').replace(/^(Error:\s*)+/, '');
+  if (/^PIN required/.test(t)) return 'Wrong password: reload the page and type it again.';
+  return 'Error: ' + t;
+}
+// A lost connection (or a Google error page) doesn't say whether the change happened.
+function netText(label){
+  return 'Couldn\u2019t hear back from the ' + label + ' inbox. It may still have gone through: tap Refresh and look before trying again.';
 }
 
 function escapeHtml(s){
