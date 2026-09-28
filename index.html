@@ -210,8 +210,9 @@ details.libbox > summary{color:var(--green);}
   <div class="panel">
     <div class="section-head">
       <span>QUEUE — NEEDS REVIEW</span>
-      <button class="btn" onclick="loadAll()" style="font-size:11px;padding:6px 12px;">Refresh</button>
+      <button class="btn" onclick="refreshAll()" style="font-size:11px;padding:6px 12px;">Refresh</button>
     </div>
+    <div id="gmail-check" class="mono dim" style="font-size:11px;margin:-4px 0 8px;min-height:14px;"></div>
     <div id="queue-list"></div>
   </div>
 
@@ -291,6 +292,9 @@ function renderSessionLine(){
     ' \u00b7 <a href="#" onclick="signOut(true);return false;" style="color:inherit;">Sign out all devices</a>';
 }
 function showGate(message){
+  allRows = [];
+  document.getElementById('queue-list').innerHTML = '';
+  document.getElementById('gmail-check').textContent = '';
   document.getElementById('pin-error').textContent = message || '';
   document.getElementById('pin-gate').style.display = 'flex';
   document.getElementById('app').style.display = 'none';
@@ -335,7 +339,7 @@ async function unlock(){
   document.getElementById('pin-gate').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   renderSessionLine();
-  loadAll();
+  refreshAll();
 }
 async function signOut(everywhere){
   if (everywhere && !confirm('Sign out every phone and computer that is signed in to this dashboard?')) return;
@@ -358,17 +362,28 @@ function activeEngines(){
   return ENGINES.filter(function(e){ return e.url && e.url.indexOf('PASTE_') !== 0; });
 }
 
+// Refresh (and opening the page, signing in, coming back to it) = show the list now AND ask each inbox to
+// check Gmail right away (Bo, 2026-09-28). New cards pop in when a check finds mail; the list never waits.
+function refreshAll(){
+  loadAll();
+  checkGmailNow(false);
+}
+
+let loadSeq = 0;
 async function loadAll(){
   const engines = activeEngines();
-  // Apps Script can take 15-30s to wake up, so show that we're working instead of an empty queue.
-  document.getElementById('queue-list').innerHTML = '<div class="empty">Loading ' + engines.length + ' inboxes… this can take up to 30 seconds.</div>';
+  // Apps Script can take 15-30s to wake up, so show that we're working instead of an empty queue. A list that's
+  // already showing stays up while it reloads.
+  if (!allRows.length) document.getElementById('queue-list').innerHTML = '<div class="empty">Loading ' + engines.length + ' inboxes… this can take up to 30 seconds.</div>';
   lastLoadAt = Date.now();
+  const seq = ++loadSeq;
   const results = await Promise.all(engines.map(function(engine){
     return fetch(engine.url, { method: 'POST', body: JSON.stringify(withAuth(engine.code, { action: 'getData' })) })
       .then(function(r){ return r.json(); })
       .then(function(data){ return { engine: engine, data: data }; })
       .catch(function(err){ return { engine: engine, data: { error: String(err) } }; });
   }));
+  if (seq !== loadSeq) return; // a newer reload started meanwhile: only the newest one draws the list
 
   allRows = [];
   let anyPinError = false;
@@ -426,6 +441,44 @@ async function loadAll(){
 let queueNotesHtml = '';
 let lastLoadAt = 0;
 
+// Asks every inbox to check Gmail now (the same check the 5-minute timer runs; it can't draft an email twice)
+// and says what happened in one line under the Refresh button. A check already running (the timer, another
+// phone) is waited on once, then the list reloads.
+let gmailCheckInFlight = false;
+async function checkGmailNow(isRetry){
+  if (gmailCheckInFlight) return;
+  const status = document.getElementById('gmail-check');
+  gmailCheckInFlight = true;
+  status.textContent = 'Checking Gmail for new email…';
+  let results = [];
+  try {
+    results = await Promise.all(activeEngines().map(function(engine){
+      return fetch(engine.url, { method: 'POST', body: JSON.stringify(withAuth(engine.code, { action: 'checkNow' })) })
+        .then(function(r){ return r.json(); })
+        .catch(function(err){ return { error: String(err) }; })
+        .then(function(data){ return { engine: engine, data: data || {} }; });
+    }));
+  } finally {
+    gmailCheckInFlight = false;
+  }
+  if (document.getElementById('app').style.display !== 'block') { status.textContent = ''; return; } // signed out meanwhile
+  if (results.some(function(r){ return r.data.sessionExpired; })) { sessionEnded(); return; }
+  let created = 0, deferred = 0, busy = false;
+  const ok = results.filter(function(r){ return r.data.ok; });
+  const failed = results.filter(function(r){ return !r.data.ok; }).map(function(r){ return r.engine.label; });
+  ok.forEach(function(r){ created += Number(r.data.created) || 0; deferred += Number(r.data.deferred) || 0; if (r.data.busy) busy = true; });
+  const at = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  let msg;
+  if (busy && !created) msg = isRetry ? 'Gmail is still being checked. New email will appear within a few minutes.' : 'Gmail is being checked right now. New email will appear in a moment.';
+  else if (ok.length && ok.every(function(r){ return r.data.recent; })) msg = 'Gmail was checked a few seconds ago.';
+  else msg = 'Gmail checked at ' + at + ': ' + (created ? created + ' new email' + (created === 1 ? '' : 's') : 'no new email') + '.';
+  if (deferred) msg += ' More are still being written and will appear within 5 minutes.';
+  if (failed.length) msg += ' Couldn’t check ' + failed.join(' and ') + ' just now; it checks itself every 5 minutes.';
+  status.textContent = msg;
+  if (created) loadAll();
+  if (busy && !isRetry) setTimeout(function(){ if (document.getElementById('app').style.display === 'block') { loadAll(); checkGmailNow(true); } }, 30000);
+}
+
 // Coming back to the page (switching apps, unlocking the phone): refresh the queue, unless an email is open
 // or a redraft is running. After an hour away the whole page reloads, so a Home Screen app picks up updates.
 function onReturn(){
@@ -436,7 +489,7 @@ function onReturn(){
   if (Object.keys(redraftsInFlight).length) return;
   const away = Date.now() - lastLoadAt;
   if (away > 3600000) { location.reload(); return; }
-  if (away > 60000) loadAll();
+  if (away > 60000) refreshAll();
 }
 document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') onReturn(); });
 window.addEventListener('pageshow', function(e){ if (e.persisted) onReturn(); });
@@ -445,7 +498,7 @@ window.addEventListener('pageshow', function(e){ if (e.persisted) onReturn(); })
 // A tab or Home Screen app left open keeps running the copy it first loaded. The published copy carries a
 // version stamp; when version.json names a newer one, the page reloads itself, but never while an email is
 // open, a Send/File/Skip or Redraft is running, or a password is half typed.
-const APP_VERSION = '20260926-184528'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
+const APP_VERSION = '20260928-223434'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
 let newerVersion = '';
 let actionsInFlight = 0;
 async function checkForUpdate(){
@@ -894,7 +947,7 @@ if (hasFullSession()) {
   document.getElementById('pin-gate').style.display = 'none';
   document.getElementById('app').style.display = 'block';
   renderSessionLine();
-  loadAll();
+  refreshAll();
 }
 checkForUpdate();
 </script>
