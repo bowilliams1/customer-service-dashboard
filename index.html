@@ -463,13 +463,14 @@ async function checkGmailNow(isRetry){
   }
   if (document.getElementById('app').style.display !== 'block') { status.textContent = ''; return; } // signed out meanwhile
   if (results.some(function(r){ return r.data.sessionExpired; })) { sessionEnded(); return; }
-  let created = 0, deferred = 0, busy = false;
+  let created = 0, deferred = 0, busy = false, paused = false;
   const ok = results.filter(function(r){ return r.data.ok; });
   const failed = results.filter(function(r){ return !r.data.ok; }).map(function(r){ return r.engine.label; });
-  ok.forEach(function(r){ created += Number(r.data.created) || 0; deferred += Number(r.data.deferred) || 0; if (r.data.busy) busy = true; });
+  ok.forEach(function(r){ created += Number(r.data.created) || 0; deferred += Number(r.data.deferred) || 0; if (r.data.busy) busy = true; if (r.data.paused) paused = true; });
   const at = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   let msg;
-  if (busy && !created) msg = isRetry ? 'Gmail is still being checked. New email will appear within a few minutes.' : 'Gmail is being checked right now. New email will appear in a moment.';
+  if (paused && !created) msg = 'Gmail checks are paused for up to 30 minutes (Google\u2019s daily email-read limit was reached). They resume by themselves; new email waits in the inbox meanwhile.';
+  else if (busy && !created) msg = isRetry ? 'Gmail is still being checked. New email will appear within a few minutes.' : 'Gmail is being checked right now. New email will appear in a moment.';
   else if (ok.length && ok.every(function(r){ return r.data.recent; })) msg = 'Gmail was checked a few seconds ago.';
   else msg = 'Gmail checked at ' + at + ': ' + (created ? created + ' new email' + (created === 1 ? '' : 's') : 'no new email') + '.';
   if (deferred) msg += ' More are still being written and will appear within 5 minutes.';
@@ -498,7 +499,7 @@ window.addEventListener('pageshow', function(e){ if (e.persisted) onReturn(); })
 // A tab or Home Screen app left open keeps running the copy it first loaded. The published copy carries a
 // version stamp; when version.json names a newer one, the page reloads itself, but never while an email is
 // open, a Send/File/Skip or Redraft is running, or a password is half typed.
-const APP_VERSION = '20261007-150003'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
+const APP_VERSION = '20261007-160759'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
 let newerVersion = '';
 let actionsInFlight = 0;
 async function checkForUpdate(){
