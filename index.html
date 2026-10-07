@@ -498,7 +498,7 @@ window.addEventListener('pageshow', function(e){ if (e.persisted) onReturn(); })
 // A tab or Home Screen app left open keeps running the copy it first loaded. The published copy carries a
 // version stamp; when version.json names a newer one, the page reloads itself, but never while an email is
 // open, a Send/File/Skip or Redraft is running, or a password is half typed.
-const APP_VERSION = '20260928-223434'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
+const APP_VERSION = '20261007-150003'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
 let newerVersion = '';
 let actionsInFlight = 0;
 async function checkForUpdate(){
@@ -914,15 +914,65 @@ async function doAction(action, rowKey, engineCode, btn){
     closeDetail();
     loadAll();
   } catch (err) {
-    alert(action === 'approveSend'
-      ? 'Couldn\u2019t confirm the send (connection problem). Tap Refresh: if this email has left the queue, it was sent. Check Gmail Sent before trying again.'
-      : netText(engine.label));
+    // The reply to the request was lost (Google's reply page didn't come through, or the connection dropped).
+    // The inbox may well have finished the job, so ask the ledger what actually happened instead of guessing
+    // (Bo, 2026-10-07: "every time it has went through").
+    noteProblem(action, engine.label, err);
+    if (btn) btn.textContent = 'Checking what happened\u2026';
+    const outcome = await verifyAfterLostReply(action, rowKey, engineCode);
+    if (outcome === 'done') { closeDetail(); loadAll(); }
+    else if (outcome === 'sending') {
+      const r0 = findRow(rowKey, engineCode);
+      if (r0) r0.Status = 'SENDING';
+      renderKpis(); renderQueue(); openDetail(rowKey, engineCode);
+      alert('The reply to this send was lost part-way, so it may or may not have gone out. Look in Gmail \u2192 Sent. If it is there, press \u201cIt went out: mark as sent\u201d; if not, press \u201cNot in Gmail Sent: put it back\u201d.');
+    } else if (outcome === 'open') {
+      alert(action === 'approveSend'
+        ? 'This email was NOT sent (the connection dropped before the inbox got it). It is still here: tap Send again.'
+        : 'That didn\u2019t go through (the connection dropped). Nothing changed: try again.');
+    } else {
+      alert(action === 'approveSend'
+        ? 'Couldn\u2019t confirm the send and couldn\u2019t reach the inbox to check. Tap Refresh: if this email has left the queue, it was sent. Check Gmail Sent before trying again.'
+        : netText(engine.label));
+    }
   } finally {
     buttons.forEach(function(b){ b.disabled = false; });
     if (btn) btn.textContent = label;
     actionsInFlight--;
     updateWhenIdle();
   }
+}
+
+// After a lost reply: the ledger is the source of truth. The inbox marks a row SENDING before the email goes out
+// and SENT (or FILED / REJECTED) after, and the queue only lists open rows. So: the row gone from the queue =
+// the action finished ('done'); SENDING = an interrupted send ('sending'); still PENDING = nothing happened
+// ('open'). Tries up to 4 times over ~25 s, since the inbox may still be finishing. 'unknown' = couldn't reach it.
+async function verifyAfterLostReply(action, rowKey, engineCode){
+  const engine = ENGINES.find(function(e){ return e.code === engineCode; });
+  let unreachable = true;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt) await new Promise(function(r){ setTimeout(r, attempt === 1 ? 5000 : 8000); });
+    let data = null;
+    try {
+      data = await fetch(engine.url, { method: 'POST', body: JSON.stringify(withAuth(engineCode, { action: 'getData' })) }).then(function(r){ return r.json(); });
+    } catch (e) { noteProblem('check after ' + action, engine.label, e); continue; }
+    if (!data || !data.ok || !data.inquiries) continue;
+    unreachable = false;
+    const row = data.inquiries.find(function(r){ return r['Row Key'] === rowKey; });
+    if (!row) return 'done';
+    if (row.Status === 'SENDING') return 'sending';
+    if (attempt === 3) return 'open';
+  }
+  return unreachable ? 'unknown' : 'open';
+}
+// What actually failed, kept where Bo can read it out (the line under Refresh) and in the console.
+let lastProblem = '';
+function noteProblem(action, label, err){
+  const what = err && err.name ? err.name + ': ' + (err.message || '') : String(err);
+  lastProblem = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) + ' · ' + action + ' (' + label + '): ' + what;
+  try { console.error('[BOSH CS] ' + lastProblem); } catch (e) { /* ignore */ }
+  const el = document.getElementById('gmail-check');
+  if (el) el.textContent = 'Last connection problem at ' + lastProblem.slice(0, 160);
 }
 
 // The engine reports errors as "Error: ..." already; don't show "Error: Error: ...". "PIN" is never shown.
