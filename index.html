@@ -109,6 +109,15 @@ header .sub{font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--dim
 .row .from{font-size:12px;color:var(--dim);font-family:'IBM Plex Mono',monospace;}
 .row .snippet{font-size:12px;color:var(--dim);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .empty{color:var(--dim);font-size:13px;padding:20px;text-align:center;}
+/* Bulk Skip/File from the phone (Bo, 2026-11-25): a big checkbox per card, a bar when any are ticked. */
+.row .pick{flex:0 0 auto;width:40px;min-height:40px;display:flex;align-items:center;justify-content:center;margin:-8px 0 -8px -8px;}
+.row .pick input{width:22px;height:22px;accent-color:var(--green);cursor:pointer;margin:0;}
+#bulk-bar{display:none;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 12px;margin-bottom:8px;
+  background:var(--panel2);border:1px solid var(--edge-lit);font-size:13px;}
+#bulk-bar.on{display:flex;}
+#bulk-bar .btn{font-size:11px;padding:6px 12px;}
+#bulk-bar .count{font-family:'IBM Plex Mono',monospace;color:var(--text);margin-right:auto;}
+#bulk-status{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--dim);width:100%;}
 
 /* detail / editor */
 .detail-body{white-space:pre-wrap;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.5;background:var(--panel2);border:1px solid var(--edge);padding:12px;margin:8px 0;}
@@ -214,6 +223,14 @@ details.libbox > summary{color:var(--green);}
       <button class="btn" onclick="refreshAll()" style="font-size:11px;padding:6px 12px;">Refresh</button>
     </div>
     <div id="gmail-check" class="mono dim" style="font-size:11px;margin:-4px 0 8px;min-height:14px;"></div>
+    <div id="bulk-bar">
+      <span class="count" id="bulk-count"></span>
+      <button class="btn" onclick="selectAllOpen()">Select all</button>
+      <button class="btn" onclick="clearSelection()">Clear</button>
+      <button class="btn" onclick="bulkAct('reject')">Skip selected</button>
+      <button class="btn" onclick="bulkAct('file')">File selected</button>
+      <div id="bulk-status"></div>
+    </div>
     <div id="queue-list"></div>
   </div>
 
@@ -442,6 +459,7 @@ async function loadAll(){
   // Drafts written with a note or past reply that has since been retired (the engine checks; this page adds
   // anything retired since the last load, in both inboxes).
   allRows.forEach(function(r){ r._usesRetired = !!r._libraryRetired || usesRetiredId(r); });
+  renderBulkBar();
   renderKpis();
   renderQueue();
 }
@@ -506,7 +524,7 @@ window.addEventListener('pageshow', function(e){ if (e.persisted) onReturn(); })
 // A tab or Home Screen app left open keeps running the copy it first loaded. The published copy carries a
 // version stamp; when version.json names a newer one, the page reloads itself, but never while an email is
 // open, a Send/File/Skip or Redraft is running, or a password is half typed.
-const APP_VERSION = '20261022-002614'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
+const APP_VERSION = '20261125-221934'; // stamped by publish_dashboard.sh; a local 'dev' copy never checks
 let newerVersion = '';
 let actionsInFlight = 0;
 async function checkForUpdate(){
@@ -587,7 +605,10 @@ function renderQueue(){
     const badge = isInternal
       ? '<span class="badge internal" title="Internal note">→J</span>'
       : brandBadge(row._engineCode);
+    const key = row._engineCode + '|' + row['Row Key'];
     return '<div class="row" onclick="openDetail(\'' + row['Row Key'] + '\',\'' + row._engineCode + '\')">' +
+      '<label class="pick" onclick="event.stopPropagation()"><input type="checkbox" aria-label="Select this email"' + (selected[key] ? ' checked' : '') +
+        ' onchange="toggleSelect(\'' + key.replace(/'/g, "\\'") + '\', this.checked)"></label>' +
       badge +
       '<div class="meta">' +
         (row.Status === 'SENDING' ? '<div><span class="pill">Interrupted send: check Gmail Sent</span></div>' : '') +
@@ -600,6 +621,75 @@ function renderQueue(){
       '<span class="tier ' + row['Safety Tier'] + '">' + row['Safety Tier'] + '</span>' +
     '</div>';
   }).join('');
+}
+
+// ---- Select several cards, then Skip or File them in one go (Bo, 2026-11-25: 41 cards piled up; the phone
+// makes one-by-one too slow). Skip = off the dashboard only (the email stays in Gmail as it is). File = also moved
+// to Answered CS. Same engine actions as the buttons on a card, run one after another, each result checked.
+const selected = {}; // 'engine|rowKey' -> true
+function toggleSelect(key, on){ if (on) selected[key] = true; else delete selected[key]; renderBulkBar(); }
+function selectAllOpen(){ allRows.filter(isOpen).forEach(function(r){ selected[r._engineCode + '|' + r['Row Key']] = true; }); renderQueue(); renderBulkBar(); }
+function clearSelection(){ Object.keys(selected).forEach(function(k){ delete selected[k]; }); renderQueue(); renderBulkBar(); }
+function selectedRows(){ return allRows.filter(function(r){ return isOpen(r) && selected[r._engineCode + '|' + r['Row Key']]; }); }
+function renderBulkBar(){
+  // forget ticks for cards that are no longer on the list
+  Object.keys(selected).forEach(function(k){ if (!allRows.some(function(r){ return isOpen(r) && r._engineCode + '|' + r['Row Key'] === k; })) delete selected[k]; });
+  const n = selectedRows().length;
+  const bar = document.getElementById('bulk-bar');
+  bar.classList.toggle('on', n > 0);
+  document.getElementById('bulk-count').textContent = n + ' selected';
+}
+let bulkRunning = false;
+async function bulkAct(action){
+  if (bulkRunning) return;
+  const rows = selectedRows();
+  if (!rows.length) return;
+  const verb = action === 'file' ? 'File' : 'Skip';
+  const what = action === 'file'
+    ? 'File ' + rows.length + ' email' + (rows.length === 1 ? '' : 's') + ' in Answered CS? Each is marked read and leaves your inbox. Nothing is sent to anyone.'
+    : 'Skip ' + rows.length + ' email' + (rows.length === 1 ? '' : 's') + '? They leave this dashboard only; the emails stay in your inbox exactly as they are.';
+  if (!confirm(what)) return;
+  bulkRunning = true; actionsInFlight++;
+  const status = document.getElementById('bulk-status');
+  const buttons = Array.prototype.slice.call(document.querySelectorAll('#bulk-bar button'));
+  buttons.forEach(function(b){ b.disabled = true; });
+  let done = 0; const problems = [];
+  try {
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const engine = ENGINES.find(function(e){ return e.code === r._engineCode; });
+      status.textContent = (verb === 'File' ? 'Filing ' : 'Skipping ') + (i + 1) + ' of ' + rows.length + '\u2026';
+      const label = (r.Subject || '(no subject)').slice(0, 40);
+      // File can't apply to the Jeff note or an interrupted send; say so instead of guessing.
+      if (action === 'file' && (String(r.Category || '').indexOf('INTERNAL:') === 0 || r.Status === 'SENDING')) {
+        problems.push(label + ': can\u2019t be filed (open it and use Skip or the send buttons)'); continue;
+      }
+      if (action === 'reject' && r.Status === 'SENDING') { problems.push(label + ': interrupted send, open it first'); continue; }
+      let res = null;
+      try {
+        res = await fetch(engine.url, { method: 'POST', body: JSON.stringify(withAuth(r._engineCode, { action: action, rowKey: r['Row Key'] })) }).then(function(x){ return x.json(); });
+      } catch (err) {
+        noteProblem(action, engine.label, err);
+        const outcome = await verifyAfterLostReply(action, r['Row Key'], r._engineCode);
+        res = outcome === 'done' ? { ok: true } : { error: outcome === 'open' ? 'did not go through, try again' : 'couldn\u2019t confirm' };
+      }
+      if (res && res.sessionExpired) { sessionEnded(); return; }
+      if (res && res.ok) {
+        done++; r.Status = action === 'file' ? 'FILED' : 'REJECTED';
+        delete selected[r._engineCode + '|' + r['Row Key']];
+        renderKpis(); renderQueue(); renderBulkBar();
+      } else {
+        problems.push(label + ': ' + errText(res && res.error).replace(/^Error: /, ''));
+      }
+    }
+  } finally {
+    bulkRunning = false; actionsInFlight--;
+    buttons.forEach(function(b){ b.disabled = false; });
+  }
+  status.textContent = verb === 'File' ? 'Filed ' + done + ' of ' + rows.length + '.' : 'Skipped ' + done + ' of ' + rows.length + '.';
+  if (problems.length) alert((rows.length - done) + ' of ' + rows.length + ' could not be ' + (verb === 'File' ? 'filed' : 'skipped') + ':\n\n' + problems.join('\n') + '\n\nThe rest are done. Those still show on the list.');
+  loadAll();
+  updateWhenIdle();
 }
 
 function findRow(rowKey, engineCode){
